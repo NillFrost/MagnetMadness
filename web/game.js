@@ -1,11 +1,37 @@
 (()=>{
 'use strict';
-const W=420,H=760,LEFT=43,RIGHT=377,BY=285,R=16,DT=1/120;
+const W=420,LEFT=43,RIGHT=377,BY=285,R=16,DT=1/120,ARCADE_PHYSICS=false;
+let H=760;
 const canvas=document.getElementById('game'),ctx=canvas.getContext('2d',{alpha:false});
+// Render at screen density when practical, but cap framebuffer area to protect
+// mobile WebView GPUs from filling multi-million-pixel canvases 60-120 times/sec.
+let canvasScale=1, renderAccumulator=0, lastDpr=0, renderQuality=1;
+let qualityWindow=0, qualityFrames=0, qualityRecovery=0;
+const CANVAS_PIXEL_BUDGET=2900000;
+function fitCanvas(){
+ const rect=canvas.getBoundingClientRect();
+ const cssWidth=Math.max(1,rect.width), cssHeight=Math.max(1,rect.height);
+ const nativeDpr=Math.max(1,window.devicePixelRatio||1);
+ const pixelLimitedDpr=Math.min(nativeDpr,Math.sqrt(CANVAS_PIXEL_BUDGET/(cssWidth*cssHeight)));
+ const renderDpr=Math.max(.8,pixelLimitedDpr*renderQuality);
+ const targetW=Math.max(1,Math.round(cssWidth*renderDpr));
+ const targetH=Math.max(1,Math.round(cssHeight*renderDpr));
+ if(canvas.width!==targetW||canvas.height!==targetH||lastDpr!==renderDpr){
+  canvas.width=targetW;canvas.height=targetH;lastDpr=renderDpr;
+ }
+ canvasScale=targetW/W;
+ H=targetH/canvasScale;
+ ctx.setTransform(canvasScale,0,0,canvasScale,0,0);
+ ctx.imageSmoothingEnabled=true;
+}
+function lowFx(){return renderQuality<.88 || meta.reducedEffects===true}
+window.addEventListener('resize',fitCanvas);
+if(window.visualViewport)window.visualViewport.addEventListener('resize',fitCanvas);
+fitCanvas();
 const status=document.getElementById('status');
 const C={bg:'#070C1D',cyan:'#4BDFFE',pink:'#FF6388',gold:'#FFD37A',white:'#F2F7FF',muted:'#8DA4C3',green:'#8CF7C1'};
 let seed=92371,fxSeed=8536421,globalTime=0,rafLast=0,accum=0,audio=null,manualFrames=false;
-let sfxBus=null,musicBus=null,musicNextAt=0,musicStep=0,settingsDrag=null;
+let sfxBus=null,settingsDrag=null;
 const clamp01=n=>Math.max(0,Math.min(1,Number.isFinite(n)?n:0));
 const skins=[{id:'chrome',name:'CHROME',cost:0,light:'#FFFFFF',dark:'#71C0DE'},{id:'plasma',name:'PLASMA',cost:120,light:'#E5FCFF',dark:'#18E9F6'},{id:'ember',name:'EMBER',cost:300,light:'#FFF3D9',dark:'#FF884D'},{id:'gold',name:'GOLD',cost:620,light:'#FFF6C9',dark:'#E7B441'},
  {id:'aurora',name:'AURORA',cost:-1,light:'#E3FFF4',dark:'#8B67FF'},
@@ -148,6 +174,45 @@ function checkMissions(){
  if(meta.stats.dailyWins>=5&&!meta.owned.has('aurora')){meta.owned.add('aurora');changed=true;if(state.mode==='play')toast('AURORA SKIN UNLOCKED',C.green)}
  if(changed)save();
 }
+// A run-scoped baseline prevents showing old lifetime achievements as new.
+// It also lets the game rank quests by actual percentage gained in this run.
+let runQuestBaseline=null, deathQuestResults=[];
+function captureRunQuestBaseline(){
+ return {dayKey:meta.daily.key,weekKey:meta.weekly.key,
+  daily:{...meta.daily.progress},weekly:{...meta.weekly.progress},career:{...meta.stats},
+  doneDaily:new Set(meta.daily.done),doneWeekly:new Set(meta.weekly.done),doneCareer:new Set(meta.done)};
+}
+function rankDeathQuests(){
+ if(!runQuestBaseline)return [];
+ const scopes=[
+  {scope:'daily',tasks:dayMissions(meta.daily.key),before:runQuestBaseline.daily,
+   doneBefore:runQuestBaseline.doneDaily,doneNow:new Set(meta.daily.done),valid:runQuestBaseline.dayKey===meta.daily.key},
+  {scope:'weekly',tasks:weeklyTasks,before:runQuestBaseline.weekly,
+   doneBefore:runQuestBaseline.doneWeekly,doneNow:new Set(meta.weekly.done),valid:runQuestBaseline.weekKey===meta.weekly.key},
+  {scope:'career',tasks:careerTasks,before:runQuestBaseline.career,
+   doneBefore:runQuestBaseline.doneCareer,doneNow:meta.done,valid:true}
+ ];
+ const results=[];
+ for(const group of scopes){
+  if(!group.valid)continue; // Do not compare across daily/weekly resets.
+  for(const task of group.tasks){
+   if(group.doneBefore.has(task.id))continue;
+   const start=Math.max(0,Number(group.before[task.key])||0);
+   const end=Math.max(0,valueFor(task.key,group.scope));
+   const oldPct=Math.min(1,start/task.goal),newPct=Math.min(1,end/task.goal);
+   const gainPct=Math.max(0,newPct-oldPct);
+   const completed=group.doneNow.has(task.id);
+   if(!completed&&gainPct<.00001)continue;
+   results.push({id:group.scope+':'+task.id,scope:group.scope,name:task.name,
+    goal:task.goal,start,end,oldPct,newPct,gainPct,completed,reward:task.reward});
+  }
+ }
+ // New completions are always first; otherwise show the largest increase,
+ // measured as a fraction of each quest goal rather than raw event counts.
+ results.sort((a,b)=>Number(b.completed)-Number(a.completed)||b.gainPct-a.gainPct||b.newPct-a.newPct||
+  ({daily:0,weekly:1,career:2}[a.scope]-{daily:0,weekly:1,career:2}[b.scope])||a.name.localeCompare(b.name));
+ return results.slice(0,3);
+}
 function claimCircuit(){
  if(state.runMode!=='daily'||state.mode!=='play'||state.circuitDay!==meta.daily.key||meta.daily.circuitClaimed||Math.floor(state.dist/10)<250)return;
  meta.daily.circuitClaimed=true;meta.coins+=85;track('dailyWins');
@@ -180,6 +245,9 @@ function force(m,x,y,pole,t=0){
 }
 function obstacleX(h,t){return h.kind==='slider'?h.x+Math.sin(t*2.5+h.phase)*h.amp:h.x}
 function baseFall(distance){return Math.min(233,152+distance*.0035)}
+// All procedurally appended magnets, hazards and gems are in ascending Y order.
+// Binary search makes physics and rendering near-constant cost in long runs.
+function fromY(list,y){let lo=0,hi=list.length;while(lo<hi){const m=(lo+hi)>>>1;if(list[m].y<y)lo=m+1;else hi=m}return lo}
 function liveMagnet(id,objects=world){return objects.magnets.find(m=>m.id===id && !m.broken)}
 function ballY(s=state,objects=world){if(s.orbit){const m=liveMagnet(s.orbit.id,objects);if(m)return m.y-s.dist+Math.sin(s.orbit.angle)*s.orbit.radius;}return BY}
 function ballWorldY(s=state,objects=world){return s.dist+ballY(s,objects)}
@@ -205,7 +273,8 @@ function orbitLaunch(auto=false){
 function tryStartOrbit(){
  if(state.orbit||state.invuln>0)return false;
  const y=ballWorldY();
- for(const m of world.magnets){
+ for(let i=fromY(world.magnets,y-86);i<world.magnets.length;i++){
+  const m=world.magnets[i];if(m.y>y+86)break;
   if(m.kind!=='orbit' || m.broken)continue;
   const dx=state.x-m.x,dy=y-m.y,d=Math.hypot(dx,dy);
   if(d<86&&d>44&&m.pole!==state.polarity && !state.awarded.has('orbitCap'+m.id)){
@@ -228,9 +297,10 @@ function updateOrbit(dt){
  if(state.x<LEFT+R+4)state.x=LEFT+R+4;
  if(state.x>RIGHT-R-4)state.x=RIGHT-R-4;
  const y=ballWorldY();
- for(const h of world.hazards){
+ for(let i=fromY(world.hazards,y-70);i<world.hazards.length;i++){
+  const h=world.hazards[i];if(h.y>y+70)break;
   if(h.broken)continue;
-  const dyy=h.y-y;if(Math.abs(dyy)>70)continue;
+  const dyy=h.y-y;
   const gap=Math.hypot(obstacleX(h,state.simT)-state.x,dyy)-(h.r+R+3);
   if(gap<0){ if(canBreakCrystal(state,h)){h.broken=true; state.shatters++; burst(obstacleX(h,state.simT),h.y-state.dist,C.gold,22,1.1); shockwave(obstacleX(h,state.simT),h.y-state.dist,C.gold,1); reward(80,'SHATTER'); addOverdrive(18); } else return false; }
  }
@@ -247,7 +317,7 @@ function physics(s,dt,objects=world,collide=true,applyEffects=false){
  s.dist+=s.speed*dt;
  let ax=(210-s.x)*.1;
  const y=ballWorldY(s,objects);
- for(const m of objects.magnets){if(m.broken)continue;if(Math.abs(m.y-y)<345)ax+=force(m,s.x,y,s.polarity,s.simT)}
+ for(let i=fromY(objects.magnets,y-345);i<objects.magnets.length;i++){const m=objects.magnets[i];if(m.y>y+345)break;if(m.broken)continue;ax+=force(m,s.x,y,s.polarity,s.simT)}
  // A soft horizontal cap and continuous damping make the ball predictable.
  s.vx=(s.vx+Math.max(-2000,Math.min(2000,ax))*dt)*Math.exp(-.99*dt);
  s.vx=Math.max(-266,Math.min(266,s.vx));
@@ -255,16 +325,16 @@ function physics(s,dt,objects=world,collide=true,applyEffects=false){
  if(s.x<LEFT+R+4){s.x=LEFT+R+4;s.vx=Math.max(0,s.vx)*.25}
  if(s.x>RIGHT-R-4){s.x=RIGHT-R-4;s.vx=Math.min(0,s.vx)*.25}
  if(collide){
-  for(const m of objects.magnets){
-   if(m.broken)continue;
-   const dyy=m.y-y;if(Math.abs(dyy)>62)continue;
+  for(let i=fromY(objects.magnets,y-62);i<objects.magnets.length;i++){
+   const m=objects.magnets[i];if(m.y>y+62)break;if(m.broken)continue;
+   const dyy=m.y-y;
    const gap=Math.hypot(m.x-s.x,dyy)-(34+R-3);
    if(s.minGap!==undefined)s.minGap=Math.min(s.minGap,gap);
    if(gap<0)return false;
   }
-  for(const h of objects.hazards){
-   if(h.broken)continue;
-   const dyy=h.y-y;if(Math.abs(dyy)>60)continue;
+  for(let i=fromY(objects.hazards,y-60);i<objects.hazards.length;i++){
+   const h=objects.hazards[i];if(h.y>y+60)break;if(h.broken)continue;
+   const dyy=h.y-y;
    const gap=Math.hypot(obstacleX(h,s.simT)-s.x,dyy)-(h.r+R+3);
    if(s.minGap!==undefined)s.minGap=Math.min(s.minGap,gap);
    if(gap<0){
@@ -279,7 +349,8 @@ function sling(s,objects=world){
  if((s.slingCooldown||0)>0)return null;
  let impulse=0,source=null;
  const y=ballWorldY(s,objects);
- for(const m of objects.magnets){
+ for(let i=fromY(objects.magnets,y-162);i<objects.magnets.length;i++){
+  const m=objects.magnets[i];if(m.y>y+162)break;
   const dx=s.x-m.x,dy=y-m.y,d=Math.hypot(dx,dy);
   if(d<162&&d>48&&s.polarity===m.pole){
    const p=Math.pow(Math.max(0,1-d/174),1.15)*184*magnetGain(m,s.simT||0)*Math.sign(dx||1);
@@ -314,7 +385,31 @@ function solverStep(nodes,objs,steps=1){
  }
  return beam;
 }
+// Geometry safety: the centre of the ball stays between PLAYER_LEFT and
+// PLAYER_RIGHT, while a magnet blocks MAGNET_CLEARANCE around its centre.
+// The old generator put magnets at x=77..155 (and their right-hand mirrors).
+// This left *almost* passable wall pockets; inside them, attraction pulled the
+// ball into the magnet while repulsion pinned it against the wall.
+//
+// Two valid layouts only:
+//   1. Wall-mounted magnet: its centre is BEHIND the playable ball-centre edge.
+//      The repelling polarity therefore pushes an edge-trapped ball INWARDS.
+//   2. Free-standing magnet: allow >= 56 units of ball-centre travel beside it.
+//      The player can stay on the outside and fall safely past the obstacle.
+const PLAYER_LEFT=LEFT+R+4,PLAYER_RIGHT=RIGHT-R-4;
+const MAGNET_CLEARANCE=34+R-3, MIN_SIDE_LANE=56;
+const FREE_LEFT=PLAYER_LEFT+MAGNET_CLEARANCE+MIN_SIDE_LANE;
+const FREE_RIGHT=PLAYER_RIGHT-MAGNET_CLEARANCE-MIN_SIDE_LANE;
+const WALL_MAGNET_LEFT=LEFT+8,WALL_MAGNET_RIGHT=RIGHT-8;
+function safeMagnetX(x,kind='normal'){
+ // Orbit capture needs an unobstructed circular path, never wall mounting.
+ if(kind==='orbit')return Math.max(185,Math.min(235,x));
+ if(x<FREE_LEFT)return x<=134?WALL_MAGNET_LEFT:FREE_LEFT;
+ if(x>FREE_RIGHT)return x>=286?WALL_MAGNET_RIGHT:FREE_RIGHT;
+ return x;
+}
 function addMag(x,y,pole,chunk,pattern,kind='normal'){
+ x=safeMagnetX(x,kind);
  world.magnets.push({id:'m'+world.magnets.length,x,y,pole,chunk,pattern,kind,
   phase:rand()*6.283,side:x<101?'left':x>320?'right':'float'});
 }
@@ -342,13 +437,15 @@ function candidates(i){
  // are harder because of decisions, not simply unbounded acceleration.
  const hazardChance=level===0?0:level===1?.25:level===2?.40:.52;
  if(rand()<hazardChance){
-  const hy=y+171,hx=[111,210,309][Math.floor(rand()*3)];
+  const hy=y+171,hx=[185,210,235][Math.floor(rand()*3)];
   if(world.magnets.every(m=>Math.hypot(m.x-hx,m.y-hy)>103)){
    const roll=rand();
    const crystal=level>=1&&roll<.26;
    const moving=!crystal&&level>=2&&roll<.62;
+   // Even at the extreme slider position, leave a real side passage.
+   // Previous x=111/309 rotors created dead-end pockets near the rails.
    world.hazards.push({id:'h'+i+'-'+world.hazards.length,x:hx,y:hy,r:crystal?(level<3?17:19):(level<2?14:16),
-    kind:crystal?'crystal':(moving?'slider':'rotor'),amp:moving?(hx===210?30:17):0,phase:rand()*6.283,broken:false});
+    kind:crystal?'crystal':(moving?'slider':'rotor'),amp:moving?(hx===210?25:12):0,phase:rand()*6.283,broken:false});
   }
  }
  world.patterns.push({i,pattern,level,passes:false});
@@ -405,61 +502,108 @@ function stage(){
  Object.assign(world,{magnets:[],hazards:[],gems:[],patterns:[],checks:[],validated:0,failed:0,solvable:false,nextChunk:0,gemCursor:0,beam:[{x:210,vx:0,dist:0,polarity:1,speed:152,boost:0,simT:0,slingCooldown:0,minGap:999}]});
  appendStage(20);
 }
-function burst(x,y,color,n=12,mul=1){if(meta.reducedEffects)n=Math.ceil(n*.38);for(let i=0;i<n;i++){
+function burst(x,y,color,n=12,mul=1){if(meta.reducedEffects)n=Math.ceil(n*.38);n=Math.min(n,lowFx()?10:26);for(let i=0;i<n;i++){
  let a=fxRand()*6.283,spd=fxRnd(38,170)*mul;state.effects.push({x,y,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,r:fxRnd(1.2,3.6),life:fxRnd(.22,.72),max:.72,color});}}
-// Separate sound-effect and music channels. Both use generated WebAudio tones;
-// the background loop is an original, compact synthesizer pattern, not a media file.
-function initAudio(){try{
- if(!audio){const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return false;
-  audio=new AC();sfxBus=audio.createGain();musicBus=audio.createGain();
-  sfxBus.connect(audio.destination);musicBus.connect(audio.destination);
-  musicNextAt=audio.currentTime+.09;musicStep=0;
+// Offline, original soundtrack. Stream compressed MP3 instead of creating WebAudio
+// oscillators for every music note during the game's 120Hz physics loop.
+const MENU_MUSIC={id:'menu-aurora',url:'audio/menu-aurora.mp3'};
+const RUN_MUSIC=[
+ {id:'magnetic-pulse',url:'audio/magnetic-pulse.mp3'},
+ {id:'polarity-shift',url:'audio/polarity-shift.mp3'},
+ {id:'deep-current',url:'audio/deep-current.mp3'},
+ {id:'overcharge',url:'audio/overcharge.mp3'}
+];
+const FADE_TIME_MS=1500;
+let musicUnlocked=false,musicCurrent=null,musicOutgoing=null,musicScene=null;
+let musicBag=[],lastGameTrack=null,lastMusicUpdate=0;
+function nextGameTrack(){
+ if(!musicBag.length){
+  musicBag=RUN_MUSIC.slice();
+  // Shuffle-bag avoids repetition until every track has played.
+  for(let i=musicBag.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[musicBag[i],musicBag[j]]=[musicBag[j],musicBag[i]]}
+  if(musicBag.length>1&&musicBag[musicBag.length-1].id===lastGameTrack){
+   [musicBag[0],musicBag[musicBag.length-1]]=[musicBag[musicBag.length-1],musicBag[0]];
+  }
  }
- if(audio.state==='suspended')audio.resume().catch(()=>{});
- setAudioMix();return true;
- }catch{return false}}
-function setAudioMix(){if(!audio)return;
- const t=audio.currentTime;
- sfxBus.gain.setTargetAtTime(meta.sfxVolume,t,.025);
- // Stop the in-game soundtrack while a rewarded advertisement is showing.
- const targetMusic=document.hidden||state.mode==='ad'?0:state.mode==='pause'?meta.musicVolume*.12:state.mode==='resume'?meta.musicVolume*.2:meta.musicVolume*.34;
- musicBus.gain.setTargetAtTime(targetMusic,t,.06);
+ const t=musicBag.pop();lastGameTrack=t.id;return t;
+}
+function desiredMusicScene(){
+ const mode=['skins','missions','settings','records'].includes(state.mode)?panelReturn:state.mode;
+ return mode==='ready'?'menu':'run';
+}
+function stopAudio(entry){if(!entry)return;entry.element.pause();entry.element.removeAttribute('src');entry.element.load()}
+function switchSoundtrack(scene,force=false){
+ if(!musicUnlocked||typeof Audio==='undefined')return;
+ if(!force && musicScene===scene&&musicCurrent)return;
+ const track=scene==='menu'?MENU_MUSIC:nextGameTrack();
+ if(musicOutgoing){stopAudio(musicOutgoing);musicOutgoing=null}
+ musicOutgoing=musicCurrent;
+ if(musicOutgoing)musicOutgoing.fadeAt=performance.now();
+ musicScene=scene;
+ const element=new Audio(track.url);element.preload='auto';element.loop=scene==='menu';element.volume=0;
+ const entry={element,id:track.id,scene,fadeAt:performance.now()};
+ musicCurrent=entry;
+ element.addEventListener('ended',()=>{
+  if(musicCurrent===entry&&entry.scene==='run')switchSoundtrack('run',true)
+ });
+ element.play().catch(()=>{}); // No playback until a user gesture unlocks audio.
+ updateSoundtrack(true);
+}
+function updateSoundtrack(force=false){
+ if(!musicUnlocked)return;
+ const now=performance.now();
+ if(!force && now-lastMusicUpdate<85)return;
+ lastMusicUpdate=now;
+ const scene=desiredMusicScene();
+ if(scene!==musicScene||!musicCurrent){switchSoundtrack(scene,true);return}
+ // Start next composition before the current one ends for a gentle crossfade.
+ const e=musicCurrent.element;
+ if(scene==='run'&&Number.isFinite(e.duration)&&e.duration>2&&e.currentTime>e.duration-1.55){
+  switchSoundtrack('run',true);return;
+ }
+ const mode=state.mode;
+ const attenuation=document.hidden||mode==='ad'?0:mode==='pause'?.12:mode==='resume'?.24:mode==='over'?.35:1;
+ const targetVolume=Math.min(1,Math.max(0,meta.musicVolume*attenuation*.86));
+ const fadeIn=Math.max(0,Math.min(1,(now-musicCurrent.fadeAt)/FADE_TIME_MS));
+ e.volume=targetVolume*fadeIn;
+ if(musicOutgoing){
+  const fadeOut=Math.max(0,1-(now-musicOutgoing.fadeAt)/FADE_TIME_MS);
+  musicOutgoing.element.volume=targetVolume*fadeOut;
+  if(fadeOut<=0){stopAudio(musicOutgoing);musicOutgoing=null}
+ }
+ // A fully muted soundtrack consumes no decoding time; user input resumes it.
+ if(targetVolume<.001){
+  if(!e.paused)e.pause();
+  if(musicOutgoing&&!musicOutgoing.element.paused)musicOutgoing.element.pause();
+ }else{
+  if(e.paused)e.play().catch(()=>{});
+  if(musicOutgoing&&musicOutgoing.element.paused)musicOutgoing.element.play().catch(()=>{});
+ }
+}
+function initAudio(){
+ try{
+  if(!audio){const AC=window.AudioContext||window.webkitAudioContext;
+   if(AC){audio=new AC();sfxBus=audio.createGain();sfxBus.connect(audio.destination)}
+  }
+  if(audio&&audio.state==='suspended')audio.resume().catch(()=>{});
+  musicUnlocked=true;setAudioMix();return true;
+ }catch{return false}
+}
+function setAudioMix(){
+ if(audio&&sfxBus)sfxBus.gain.setTargetAtTime(meta.sfxVolume,audio.currentTime,.025);
+ if(musicUnlocked)updateSoundtrack(true);
 }
 function blip(freq=420,dur=.08,type='sine',gain=.05){if(meta.sfxVolume<=0)return;try{
- if(!initAudio())return;
+ if(!initAudio()||!audio||!sfxBus)return;
  const osc=audio.createOscillator(),vol=audio.createGain(),t=audio.currentTime;
  osc.type=type;osc.frequency.setValueAtTime(freq,t);osc.frequency.exponentialRampToValueAtTime(Math.max(65,freq*.65),t+dur);
  vol.gain.setValueAtTime(gain,t);vol.gain.exponentialRampToValueAtTime(.001,t+dur);
  osc.connect(vol);vol.connect(sfxBus);osc.start(t);osc.stop(t+dur+.01);
- }catch{}}
+ }catch{}
+}
 function chord(freq=520,energy=1){
  blip(freq,.11,'triangle',.035*energy);
  blip(freq*1.48,.17,'sine',.020*energy);
-}
-const musicPattern=[329.63,0,392,493.88,440,0,392,293.66,329.63,0,493.88,587.33,392,0,293.66,246.94];
-function playMusicNote(freq,start,step){
- if(!audio||!musicBus||meta.musicVolume<=0)return;
- const osc=audio.createOscillator(),env=audio.createGain();
- osc.type='triangle';osc.frequency.setValueAtTime(freq,start);
- env.gain.setValueAtTime(.0001,start);env.gain.exponentialRampToValueAtTime(.13,start+.025);
- env.gain.exponentialRampToValueAtTime(.0001,start+.25);
- osc.connect(env);env.connect(musicBus);osc.start(start);osc.stop(start+.28);
- if(step%4===0){const bass=audio.createOscillator(),v=audio.createGain();bass.type='sine';
-  bass.frequency.setValueAtTime([164.81,146.83,130.81,146.83][Math.floor(step/4)],start);
-  v.gain.setValueAtTime(.0001,start);v.gain.exponentialRampToValueAtTime(.12,start+.045);
-  v.gain.exponentialRampToValueAtTime(.0001,start+.56);bass.connect(v);v.connect(musicBus);bass.start(start);bass.stop(start+.6);
- }
-}
-function scheduleMusic(){if(!audio||audio.state!=='running')return;
- if(document.hidden||state.mode==='ad'||meta.musicVolume<=0){musicNextAt=audio.currentTime+.04;return}
- const now=audio.currentTime;
- if(musicNextAt<now-.1)musicNextAt=now+.04;
- let batch=0;
- while(musicNextAt<now+.24&&batch++<3){
-  const step=musicStep++%musicPattern.length,note=musicPattern[step];
-  if(note)playMusicNote(note,musicNextAt,step);
-  musicNextAt+=.29;
- }
 }
 function shockwave(x,y,color,power=1){
  state.rings.push({x,y,r:21,life:.58,max:.58,color,power});
@@ -477,8 +621,10 @@ function reward(points,why,skill=true){
 // Optional native AdMob bridge. A trusted Android wrapper should expose
 // window.MagnetRewardedAds.showRewarded('revive'), resolving to {rewarded:true}
 // ONLY from the SDK's onUserEarnedReward callback. No reward on dismissal/error.
-// Browser test simulation is opt-in: ?demoAds=1. It is not a real advertisement.
-const demoAds=(()=>{try{return new URLSearchParams(location.search).get('demoAds')==='1' || window.__MAGNET_AD_DEMO__===true}catch{return window.__MAGNET_AD_DEMO__===true}})();
+// Test build: fake rewarded ad is enabled by default until the real SDK exists.
+// This 3-second placeholder is NOT a paid ad and must be removed before release.
+const demoAds=true;
+let demoAdEndAt=0;
 function canShowRewarded(){return !!(window.MagnetRewardedAds&&typeof window.MagnetRewardedAds.showRewarded==='function')||demoAds}
 function commitEarnings(){
  // One lifetime of a run may end twice (before and after a rewarded continue).
@@ -494,8 +640,8 @@ function commitEarnings(){
 function collisionClearance(x,dist){
  const y=dist+BY;
  let gap=999;
- for(const m of world.magnets){if(m.broken)continue;if(Math.abs(m.y-y)<90)gap=Math.min(gap,Math.hypot(m.x-x,m.y-y)-(34+R-3));}
- for(const h of world.hazards){if(h.broken)continue;if(Math.abs(h.y-y)<75)gap=Math.min(gap,Math.hypot(obstacleX(h,state.simT)-x,h.y-y)-(h.r+R+3));}
+ for(let i=fromY(world.magnets,y-90);i<world.magnets.length;i++){const m=world.magnets[i];if(m.y>y+90)break;if(!m.broken)gap=Math.min(gap,Math.hypot(m.x-x,m.y-y)-(34+R-3));}
+ for(let i=fromY(world.hazards,y-75);i<world.hazards.length;i++){const h=world.hazards[i];if(h.y>y+75)break;if(!h.broken)gap=Math.min(gap,Math.hypot(obstacleX(h,state.simT)-x,h.y-y)-(h.r+R+3));}
  return gap;
 }
 function reviveAfterReward(){
@@ -519,14 +665,14 @@ function reviveAfterReward(){
 async function requestRevive(){
  if(state.mode!=='over'||state.reviveUsed||state.adPending)return false;
  if(!canShowRewarded()){state.adError='REWARDED ADS UNAVAILABLE';render();return false}
- state.adPending=true;state.adError='';state.mode='ad';setAudioMix();status.textContent='Rewarded ad in progress';render();
+ state.adPending=true;state.adError='';state.mode='ad';demoAdEndAt=performance.now()+3000;setAudioMix();status.textContent='Test advertisement • 3 seconds';render();
  try{
   let result;
   if(window.MagnetRewardedAds&&typeof window.MagnetRewardedAds.showRewarded==='function'){
    result=await window.MagnetRewardedAds.showRewarded('revive');
   }else if(demoAds){
-   // Clearly labelled preview; no Google ad is displayed or counted.
-   await new Promise(resolve=>setTimeout(resolve,1250));result={rewarded:true,demo:true};
+   // The player sees a plain fake ad screen for exactly three wall-clock seconds.
+   await new Promise(resolve=>setTimeout(resolve,3000));result={rewarded:true,demo:true};
   }
   if(state.mode!=='ad')return false;
   if(result&&result.rewarded===true)return reviveAfterReward();
@@ -537,7 +683,7 @@ async function requestRevive(){
 
 function resetRun(soft=false,runMode='normal'){
  // The normal first run continues the ready-state shaft without reinitialization.
- syncPeriods();meta.runs++;
+ syncPeriods();runQuestBaseline=captureRunQuestBaseline();deathQuestResults=[];meta.runs++;
  state.runMode=runMode;state.circuitDay=runMode==='daily'?meta.daily.key:null;
  if(!soft||runMode==='daily')stage();
  Object.assign(state,{mode:'play',x:210,vx:0,dist:0,polarity:1,speed:156,boost:0,flipPulse:0,
@@ -546,11 +692,12 @@ function resetRun(soft=false,runMode='normal'){
   closest:new Map(),uiSlide:soft?1:0,simT:0,slingCooldown:0,rings:[],pulseHit:0,progressMeters:0,reviveUsed:false,invuln:0,adPending:false,adError:'',runPaid:0,overdriveCharge:0,overdriveTime:0,orbit:null,shatters:0,resumeTimer:0,resumeFlash:0});
  const today=localDayKey(currentDate());if(!meta.daysPlayed.includes(today))meta.daysPlayed=[...meta.daysPlayed,today].slice(-60);
  track('runs');save();status.textContent='Playing. Tap to switch polarity.';
+ if(musicUnlocked)switchSoundtrack('run',true);
 }
 // RETRY goes to the same seamless tap-to-play home screen; it never starts a run.
 function returnToHome(){
  syncPeriods();
- state.runMode='normal';state.circuitDay=null;
+ state.runMode='normal';state.circuitDay=null;runQuestBaseline=null;deathQuestResults=[];
  Object.assign(state,{mode:'ready',x:210,vx:0,dist:0,polarity:1,speed:156,boost:0,flipPulse:0,
   score:0,gems:0,near:0,boosts:0,combo:0,comboTime:0,bonus:0,flips:0,time:0,shake:0,
   reason:'',effects:[],trail:[],messages:[],claimed:new Set(),awarded:new Set(),
@@ -558,7 +705,7 @@ function returnToHome(){
   reviveUsed:false,invuln:0,adPending:false,adError:'',runPaid:0,overdriveCharge:0,overdriveTime:0,orbit:null,shatters:0,resumeTimer:0,resumeFlash:0});
  stage();
  status.textContent='Tap empty space to begin';
- render();
+ setAudioMix();render();
 }
 function pauseRun(){
  if(state.mode!=='play')return false;
@@ -571,13 +718,15 @@ function beginResumeCountdown(){
 function pauseContinueBounds(){return {x:64,y:334,w:292,h:62}}
 function pauseSettingsBounds(){return {x:64,y:406,w:138,h:52}}
 function pauseHomeBounds(){return {x:218,y:406,w:138,h:52}}
-// The Retry button stays in the same place on both deaths to prevent surprise taps.
-function retryBounds(){return {x:72,y:552,w:276,h:65}}
+// Both game-over actions use exactly the same dimensions and stay aligned.
+function reviveBounds(){return {x:48,y:552,w:155,h:68}}
+function retryBounds(){return {x:217,y:552,w:155,h:68}}
 function retryHit(x,y){const b=retryBounds();return x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h}
 function die(reason){if(state.mode!=='play')return;state.mode='over';state.reason=reason;state.shake=12;
- state.orbit=null;burst(state.x,ballY(),C.pink,34,2);blip(170,.35,'sawtooth',.035);
- commitEarnings();
- status.textContent='Game over '+reason+'. Score '+state.score+'. Choose revive or return to start.';}
+ state.orbit=null;state.deathUiTime=0;burst(state.x,ballY(),C.pink,34,2);blip(170,.35,'sawtooth',.035);
+ commitEarnings();deathQuestResults=rankDeathQuests();
+ status.textContent='Game over '+reason+'. Score '+state.score+'. Choose revive or return to start.';
+ setAudioMix();}
 function flip(){if(state.mode!=='play')return;
  if(state.orbit){orbitLaunch(false);return}
  state.polarity*=-1;state.flips++;state.flipPulse=1;track('flips');
@@ -607,8 +756,14 @@ const homeButtons=[
 ];
 function openPanel(which,from=state.mode){syncPeriods();panelReturn=['ready','play','over','pause'].includes(from)?from:'ready';state.mode=which;setAudioMix();if(which==='missions')missionTab='daily';if(which==='skins'){cosmeticTab='ball';cosmeticSelection.ball=meta.skin;cosmeticSelection.magnets=meta.magnetSkin;cosmeticSelection.backgrounds=meta.backgroundSkin;}status.textContent=which+' panel';}
 function closePanel(){settingsDrag=null;state.mode=panelReturn;setAudioMix();status.textContent=state.mode==='ready'?'Tap empty space to begin':state.mode==='play'?'Playing. Tap to switch polarity.':state.mode==='pause'?'Paused':'Game over. Use Retry to return to start';}
-function homeHit(px,py){for(const btn of homeButtons){if(Math.hypot(px-btn.x,py-btn.y)<43){openPanel(btn.id,'ready');return true}}return false}
-function inputPoint(e){if(!e)return {x:210,y:385};const b=canvas.getBoundingClientRect();return {x:(e.clientX-b.left)*W/b.width,y:(e.clientY-b.top)*H/b.height}}
+function homeHit(px,py){for(const btn of homeButtons){if(Math.hypot(px-btn.x,py-btn.y-(H-760)*.48)<43){openPanel(btn.id,'ready');return true}}return false}
+function inputPoint(e){
+ if(!e)return {x:210,y:385};
+ const b=canvas.getBoundingClientRect(), x=(e.clientX-b.left)*W/b.width;
+ let y=(e.clientY-b.top)*H/b.height;
+ if(['skins','missions','settings','records','over','pause','ad','resume'].includes(state.mode)) y-=(H-760)*.5;
+ return {x,y};
+}
 function changeVolume(channel,x){
  const value=Math.round(clamp01((x-77)/266)*100)/100;
  if(channel==='sfx')meta.sfxVolume=value;
@@ -654,7 +809,7 @@ function onInput(e){
  }
  if(state.mode==='ad')return; // Prevent double taps while external ad UI is active.
  if(state.mode==='over'){
-  if(!state.reviveUsed&&p.y>=459&&p.y<=537&&p.x>=40&&p.x<=380){requestRevive();return}
+  const revive=reviveBounds();if(!state.reviveUsed&&p.x>=revive.x&&p.x<=revive.x+revive.w&&p.y>=revive.y&&p.y<=revive.y+revive.h){requestRevive();return}
   // Only the retry button can leave the death screen. Never start a run here.
   if(retryHit(p.x,p.y))returnToHome();
   return;
@@ -678,13 +833,16 @@ canvas.addEventListener('pointermove',onSettingsPointerMove,{passive:false});
 canvas.addEventListener('pointerup',onSettingsPointerUp);
 canvas.addEventListener('pointercancel',onSettingsPointerUp);
 window.addEventListener('keydown',e=>{
+ if(['Space','Enter','ArrowUp','KeyP','KeyM','KeyC'].includes(e.code))initAudio();
  if(['Space','Enter','ArrowUp'].includes(e.code)&&!e.repeat){e.preventDefault();if(state.mode==='ready')resetRun(true);else if(state.mode==='over')returnToHome();else if(state.mode==='play')flip();else if(state.mode==='pause')beginResumeCountdown();else if(state.mode==='resume')return;else closePanel()}
  if(e.code==='KeyP'){if(state.mode==='play')pauseRun();else if(state.mode==='pause')beginResumeCountdown();}
  if(e.code==='KeyM'||e.code==='KeyC'){e.preventDefault();if(['skins','missions','settings','records'].includes(state.mode))closePanel();else if(['play','ready'].includes(state.mode))openPanel('skins',state.mode)}
  if(e.code==='Escape'){if(['skins','missions','settings','records'].includes(state.mode))closePanel();else if(state.mode==='play')pauseRun();else if(state.mode==='pause')beginResumeCountdown()}
 });
 document.addEventListener('visibilitychange',()=>{if(document.hidden){if(state.mode==='play')pauseRun();save()}setAudioMix()});
-function update(dt){globalTime+=dt;state.time+=dt;scheduleMusic();state.flipPulse=Math.max(0,state.flipPulse-dt*2.65);state.uiSlide=Math.max(0,state.uiSlide-dt*2.35);if(state.mode==='resume'){state.resumeTimer=Math.max(0,state.resumeTimer-dt);state.resumeFlash=Math.max(0,(state.resumeFlash||0)-dt*2.2);const shown=Math.ceil(state.resumeTimer); if(shown>=1&&Math.abs(state.resumeTimer-(shown-1))<dt*.8){blip(430+shown*60,.055,'sine',.025);state.resumeFlash=1;} if(state.resumeTimer<=0){state.mode='play';setAudioMix();status.textContent='Playing. Tap to switch polarity.'; blip(760,.08,'triangle',.03);} } 
+function update(dt){globalTime+=dt;state.time+=dt;
+ if(state.mode==='over')state.deathUiTime=Math.min(9,(state.deathUiTime||0)+dt);
+ state.flipPulse=Math.max(0,state.flipPulse-dt*2.65);state.uiSlide=Math.max(0,state.uiSlide-dt*2.35);if(state.mode==='resume'){state.resumeTimer=Math.max(0,state.resumeTimer-dt);state.resumeFlash=Math.max(0,(state.resumeFlash||0)-dt*2.2);const shown=Math.ceil(state.resumeTimer); if(shown>=1&&Math.abs(state.resumeTimer-(shown-1))<dt*.8){blip(430+shown*60,.055,'sine',.025);state.resumeFlash=1;} if(state.resumeTimer<=0){state.mode='play';setAudioMix();status.textContent='Playing. Tap to switch polarity.'; blip(760,.08,'triangle',.03);} } 
  if(Math.floor(globalTime)!==lastPeriodPoll){lastPeriodPoll=Math.floor(globalTime);syncPeriods()}
  if(globalTime-lastProgressSave>9){lastProgressSave=globalTime;save()}
 
@@ -701,21 +859,21 @@ function update(dt){globalTime+=dt;state.time+=dt;scheduleMusic();state.flipPuls
   if(meters>state.progressMeters){track('meters',meters-state.progressMeters);state.progressMeters=meters}
   claimCircuit();
   const y=ballWorldY(), sy=ballY();
-  for(const m of world.magnets){if(m.broken||Math.abs(m.y-y)>90)continue;
+  for(let i=fromY(world.magnets,y-90);i<world.magnets.length;i++){const m=world.magnets[i];if(m.y>y+90)break;if(m.broken)continue;
    let d=Math.hypot(m.x-state.x,m.y-y),key=m.id;
    if(d<82&&d>47&&!state.awarded.has('near'+key)){state.awarded.add('near'+key);state.near++;track('near');reward(40,'CLOSE CALL');burst(state.x,sy,C.gold,7,.65);addOverdrive(14)}
   }
-  for(const h of world.hazards){if(h.broken||Math.abs(h.y-y)>65)continue;
+  for(let i=fromY(world.hazards,y-65);i<world.hazards.length;i++){const h=world.hazards[i];if(h.y>y+65)break;if(h.broken)continue;
    let d=Math.hypot(obstacleX(h,state.simT)-state.x,h.y-y);
    if(d<h.r+R+28&&d>h.r+R+3&&!state.awarded.has('near'+h.id)){state.awarded.add('near'+h.id);state.near++;track('near');reward(55,h.kind==='crystal'?'THREAD THE SHARD':'NEAR MISS');burst(state.x,sy,C.gold,10,.8);addOverdrive(18)}
   }
-  for(const g of world.gems){if(Math.abs(g.y-y)>28||state.claimed.has(g.id))continue;
+  for(let i=fromY(world.gems,y-28);i<world.gems.length;i++){const g=world.gems[i];if(g.y>y+28)break;if(state.claimed.has(g.id))continue;
    if(Math.hypot(g.x-state.x,g.y-y)<R+14){state.claimed.add(g.id);state.gems++;track('gems');reward(25,'CRYSTAL',false);burst(g.x,g.y-state.dist,C.gold,14,.9);chord(740,.8);addOverdrive(5)}
   }
   if(state.comboTime>0)state.comboTime-=dt;else state.combo=0;
   state.score=Math.max(state.score,Math.floor(state.dist/7)+state.bonus+((state.overdriveTime||0)>0?Math.floor(dt*22):0));
   if(state.dist/10>meta.bestDepth+50)meta.bestDepth=Math.floor(state.dist/10);
-  state.trail.push({x:state.x,y:sy,life:.42,pole:state.polarity});if(state.trail.length>54)state.trail.shift();
+  state.trail.push({x:state.x,y:sy,life:.42,pole:state.polarity});if(state.trail.length>(lowFx()?28:44))state.trail.shift();
  }
  if(state.mode!=='pause'&&state.mode!=='resume'){
   for(const p of state.trail){p.y+=state.speed*dt;p.life-=dt}state.trail=state.trail.filter(p=>p.life>0);
@@ -726,6 +884,7 @@ function update(dt){globalTime+=dt;state.time+=dt;scheduleMusic();state.flipPuls
  }
 }
 function rr(x,y,w,h,r,fill,stroke,lw=1){ctx.beginPath();ctx.roundRect(x,y,w,h,r);if(fill){ctx.fillStyle=fill;ctx.fill()}if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=lw;ctx.stroke()}}
+function flatButton(x,y,w,h,r,base,border){ctx.save();ctx.shadowBlur=0;rr(x,y,w,h,r,base,border,1.6);ctx.restore();}
 function glossyButton(x,y,w,h,r,base,border,glow=0,glowColor=border){ctx.save();if(glow>0){ctx.shadowBlur=18+18*glow;ctx.shadowColor=glowColor;}rr(x,y,w,h,r,base,border,1.8);ctx.shadowBlur=0;ctx.beginPath();ctx.roundRect(x+3,y+3,w-6,h*.43,r-4);ctx.fillStyle='rgba(255,255,255,.12)';ctx.fill();ctx.globalAlpha=.18;ctx.beginPath();ctx.roundRect(x+2,y+h*.58,w-4,h*.18,r-5);ctx.fillStyle='#03111D';ctx.fill();ctx.restore()}
 function accentBar(x,y,w,col,a=.85){ctx.save();ctx.globalAlpha=a;rr(x,y,w,4,3,col);ctx.restore()}
 function circle(x,y,r,fill,stroke,lw=1){ctx.beginPath();ctx.arc(x,y,r,0,6.283);if(fill){ctx.fillStyle=fill;ctx.fill()}if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=lw;ctx.stroke()}}
@@ -736,9 +895,13 @@ const backgroundPalettes={
  cyber:{top:'#180E35',mid:'#090F29',bottom:'#201142',line:'#4B287C',cross:'#263469',wall:'#1C1640',rail:'#8A4EB7'},
  frost:{top:'#10283B',mid:'#081827',bottom:'#17364D',line:'#2C5770',cross:'#29475C',wall:'#17394B',rail:'#7BBCCF'}
 };
+const backgroundCache=new Map();
 function background(){
  const theme=meta.backgroundSkin,colors=backgroundPalettes[theme]||backgroundPalettes.reactor;
- let gr=ctx.createLinearGradient(0,0,W,H);gr.addColorStop(0,colors.top);gr.addColorStop(.48,colors.mid);gr.addColorStop(1,colors.bottom);ctx.fillStyle=gr;ctx.fillRect(0,0,W,H);
+ const gradKey=theme+':'+Math.round(H);
+ let gr=backgroundCache.get(gradKey);
+ if(!gr){gr=ctx.createLinearGradient(0,0,W,H);gr.addColorStop(0,colors.top);gr.addColorStop(.48,colors.mid);gr.addColorStop(1,colors.bottom);backgroundCache.clear();backgroundCache.set(gradKey,gr)}
+ ctx.fillStyle=gr;ctx.fillRect(0,0,W,H);
  const dist=state.dist;
  if(theme==='cyber'){
   ctx.save();ctx.globalAlpha=.22;for(let i=0;i<18;i++){
@@ -764,7 +927,8 @@ const FLOW={pull:'#65FFE5',push:'#FFBE71'};
 function activeFields(){
  if(state.mode!=='play'&&state.mode!=='over')return [];
  const by=ballY(),y=ballWorldY(),found=[];
- for(const m of world.magnets){
+ for(let i=fromY(world.magnets,state.dist+by-278);i<world.magnets.length;i++){
+  const m=world.magnets[i];if(m.y>state.dist+by+278)break;
   if(m.broken)continue;
   const sy=m.y-state.dist,dx=m.x-state.x,dy=sy-by,d=Math.hypot(dx,dy);
   if(d>278||d<42||sy<-75||sy>H+65)continue;
@@ -783,7 +947,7 @@ function drawArrow(x,y,ang,color,a=1,size=6){
 }
 function drawForceLinks(fields){
  ctx.save();ctx.beginPath();ctx.rect(LEFT+6,99,RIGHT-LEFT-12,H-184);ctx.clip();
- for(const f of [...fields].reverse()){
+ for(const f of (lowFx()?fields.slice(0,2):fields).slice().reverse()){
   const {m,sy,d,strength,pull,dx,dy}=f;
   const color=pull?FLOW.pull:FLOW.push;
   const k=Math.min(1,Math.max(0,(strength-.10)/.9));
@@ -800,7 +964,7 @@ function drawForceLinks(fields){
    ctx.quadraticCurveTo(centerX+nx*offset,centerY+ny*offset,mx,my);
    ctx.strokeStyle=color;ctx.globalAlpha=(side===0?.20:.065)*(.25+.75*k);
    ctx.lineWidth=side===0?2.2+2.5*k:1.1;
-   if(side===0){ctx.shadowColor=color;ctx.shadowBlur=9+9*k}
+   if(side===0){ctx.shadowColor=color;ctx.shadowBlur=lowFx()?0:9+9*k}
    ctx.stroke();ctx.shadowBlur=0;
   }
   // Traveling directional chevrons, rather than a static rigid 'tail'.
@@ -819,7 +983,7 @@ function drawForceLinks(fields){
    let t=((globalTime*(.50+.32*k)+i/(meta.reducedEffects?1:3) + (m.x%17)/17)%1);if(!pull)t=1-t;
    const pt=curvePoint(bx,by,centerX,centerY,mx,my,t);
    ctx.globalAlpha=(.18+.58*k)*Math.sin(Math.PI*t);
-   ctx.shadowBlur=8;ctx.shadowColor=color;circle(pt.x,pt.y,1.5+1.1*k,color);
+   ctx.shadowBlur=lowFx()?0:8;ctx.shadowColor=color;circle(pt.x,pt.y,1.5+1.1*k,color);
   }
   ctx.restore();
  }
@@ -839,14 +1003,14 @@ function drawMagnet(m,fields){if(m.broken)return;const y=m.y-state.dist;if(y<-12
    ctx.globalAlpha=(.13+intensity*.21)*(1-wave*.6);
    ctx.lineWidth=1+intensity*1.6;circle(m.x,y,r,undefined,hue,ctx.lineWidth);
   }
-  ctx.globalAlpha=1;ctx.shadowColor=hue;ctx.shadowBlur=18+intensity*20;
- }else{ctx.shadowColor=col;ctx.shadowBlur=11}
+  ctx.globalAlpha=1;ctx.shadowColor=hue;ctx.shadowBlur=lowFx()?0:18+intensity*20;
+ }else{ctx.shadowColor=col;ctx.shadowBlur=lowFx()?0:11}
  // Main N/S badge is rendered LAST; field effects never obscure the letter.
  circle(m.x,y,34,'#111E34',col,2.5);ctx.shadowBlur=0;
  circle(m.x,y,26,m.pole===1?'#17516B':'#622740',col,1.6);
  const ms=meta.magnetSkin;
  if(ms==='cyber'){
-  ctx.save();ctx.shadowColor='#BF7BFF';ctx.shadowBlur=13;
+  ctx.save();ctx.shadowColor='#BF7BFF';ctx.shadowBlur=lowFx()?0:13;
   circle(m.x,y,31,undefined,'#BB84FF',2.2);ctx.shadowBlur=0;
   for(let j=0;j<4;j++){const a=globalTime*.16+j*Math.PI/2;circle(m.x+31*Math.cos(a),y+31*Math.sin(a),2.1,'#D0A8FF')}
   ctx.restore();
@@ -882,7 +1046,7 @@ function drawBallForce(fields){
  ctx.save();
  // Keep only a subtle reactive glow around the ball; the field ribbons already
  // communicate direction clearly enough without an extra arrow on the orb.
- ctx.shadowBlur=12;ctx.shadowColor=col;
+ ctx.shadowBlur=lowFx()?0:12;ctx.shadowColor=col;
  const by=ballY();
  circle(state.x,by,20+3*Math.sin(globalTime*7),undefined,col,.75+1.8*magnitude);
  ctx.shadowBlur=0;
@@ -892,19 +1056,19 @@ function drawBallForce(fields){
 }
 function drawHazard(h){if(h.broken)return;const y=h.y-state.dist;if(y<-65||y>H+65)return;ctx.save();ctx.translate(obstacleX(h,state.simT),y);
  if(h.kind==='crystal'){
-  ctx.rotate(Math.PI/4+Math.sin(globalTime*3+h.phase)*.08);ctx.shadowBlur=20;ctx.shadowColor='#FFD989';
+  ctx.rotate(Math.PI/4+Math.sin(globalTime*3+h.phase)*.08);ctx.shadowBlur=lowFx()?0:20;ctx.shadowColor='#FFD989';
   let g=ctx.createLinearGradient(-h.r,-h.r,h.r,h.r);g.addColorStop(0,'#FFF8D1');g.addColorStop(.55,'#FFD46F');g.addColorStop(1,'#A66E1F');
   ctx.fillStyle=g;ctx.beginPath();ctx.moveTo(0,-h.r-5);ctx.lineTo(h.r*.78,0);ctx.lineTo(0,h.r+5);ctx.lineTo(-h.r*.78,0);ctx.closePath();ctx.fill();ctx.shadowBlur=0;
   ctx.strokeStyle='#FFF0B2';ctx.lineWidth=1.6;ctx.stroke(); line(0,-h.r*.75,0,h.r*.72,'rgba(255,255,255,.55)',1.1);
  }else{
   ctx.rotate(state.time*(h.kind==='slider'?-2.75:2.1)+h.phase);
-  ctx.shadowBlur=h.kind==='slider'?19:12;ctx.shadowColor=h.kind==='slider'?C.gold:C.pink;ctx.fillStyle=h.kind==='slider'?'#FFAE72':'#FF6882';
+  ctx.shadowBlur=lowFx()?0:(h.kind==='slider'?19:12);ctx.shadowColor=h.kind==='slider'?C.gold:C.pink;ctx.fillStyle=h.kind==='slider'?'#FFAE72':'#FF6882';
   ctx.beginPath();for(let i=0;i<20;i++){let a=i*Math.PI/10,r=i%2===0?h.r+6:h.r-3;i?ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r):ctx.moveTo(Math.cos(a)*r,Math.sin(a)*r)}ctx.closePath();ctx.fill();ctx.shadowBlur=0;
   circle(0,0,h.r-6,'#652A47','#FFB4BB');circle(0,0,4,'#E9C6CE');
  }
  ctx.restore();}
-function drawGem(g){if(state.claimed.has(g.id))return;let y=g.y-state.dist;if(y<-30||y>H+30)return;ctx.save();ctx.translate(g.x,y);ctx.rotate(Math.PI/4+state.time*.5);ctx.shadowBlur=19;ctx.shadowColor=C.gold;rr(-7,-7,14,14,2,C.gold);ctx.restore()}
-function ball(x,y,rad=17,pole=state.polarity,skinId=meta.skin){const col=pole===1?C.cyan:C.pink,skin=skins.find(s=>s.id===skinId)||skins[0];ctx.save();ctx.shadowBlur=26;ctx.shadowColor=col;circle(x,y,rad+3,col);ctx.shadowBlur=0;
+function drawGem(g){if(state.claimed.has(g.id))return;let y=g.y-state.dist;if(y<-30||y>H+30)return;ctx.save();ctx.translate(g.x,y);ctx.rotate(Math.PI/4+state.time*.5);ctx.shadowBlur=lowFx()?0:19;ctx.shadowColor=C.gold;rr(-7,-7,14,14,2,C.gold);ctx.restore()}
+function ball(x,y,rad=17,pole=state.polarity,skinId=meta.skin){const col=pole===1?C.cyan:C.pink,skin=skins.find(s=>s.id===skinId)||skins[0];ctx.save();ctx.shadowBlur=lowFx()?0:26;ctx.shadowColor=col;circle(x,y,rad+3,col);ctx.shadowBlur=0;
  const gr=ctx.createLinearGradient(x-rad,y-rad,x+rad,y+rad);gr.addColorStop(0,skin.light);gr.addColorStop(1,skin.dark);circle(x,y,rad,gr);
  line(x-rad*.40,y,x+rad*.40,y,pole===1?'#1C6586':'#883956',2.6);if(pole===1)line(x,y-rad*.4,x,y+rad*.4,'#1C6586',2.6);
  circle(x-rad*.3,y-rad*.36,2.8,'rgba(255,255,255,.85)');
@@ -921,13 +1085,13 @@ function drawBall(fields){
  }
  ctx.globalAlpha=1;
  const by=ballY();
- if(state.boost>5){ctx.save();ctx.shadowColor=C.gold;ctx.shadowBlur=16;circle(state.x,by,22+Math.sin(globalTime*20)*2,undefined,C.gold,1.5);ctx.restore()}
- if(state.overdriveTime>0){ctx.save();ctx.shadowColor=C.gold;ctx.shadowBlur=18;ctx.globalAlpha=.85;circle(state.x,by,25+Math.sin(globalTime*12)*1.6,undefined,C.gold,2.3);ctx.globalAlpha=.45;circle(state.x,by,34,undefined,C.gold,1.4);ctx.restore()}
+ if(state.boost>5){ctx.save();ctx.shadowColor=C.gold;ctx.shadowBlur=lowFx()?0:16;circle(state.x,by,22+Math.sin(globalTime*20)*2,undefined,C.gold,1.5);ctx.restore()}
+ if(state.overdriveTime>0){ctx.save();ctx.shadowColor=C.gold;ctx.shadowBlur=lowFx()?0:18;ctx.globalAlpha=.85;circle(state.x,by,25+Math.sin(globalTime*12)*1.6,undefined,C.gold,2.3);ctx.globalAlpha=.45;circle(state.x,by,34,undefined,C.gold,1.4);ctx.restore()}
  else if(state.overdriveCharge>0){ctx.save();ctx.globalAlpha=.88;ctx.lineWidth=2.5;ctx.strokeStyle='rgba(255,214,100,.85)';ctx.beginPath();ctx.arc(state.x,by,24,-Math.PI/2,-Math.PI/2+Math.PI*2*(state.overdriveCharge/100));ctx.stroke();ctx.restore()}
  ball(state.x,by,16);drawBallForce(fields);
  if(state.invuln>0&&state.mode==='play'){
   ctx.save();const pulse=.50+.27*Math.sin(globalTime*12);
-  ctx.shadowBlur=18;ctx.shadowColor=C.green;ctx.globalAlpha=pulse;
+  ctx.shadowBlur=lowFx()?0:18;ctx.shadowColor=C.green;ctx.globalAlpha=pulse;
   circle(state.x,by,27+2.5*Math.sin(globalTime*7),undefined,C.green,2.6);
   ctx.globalAlpha=pulse*.42;circle(state.x,by,35+2*Math.sin(globalTime*5),undefined,C.green,1.3);
   ctx.restore();
@@ -953,7 +1117,7 @@ function hud(){
  ctx.fillStyle=shade;ctx.fillRect(0,0,W,146);
  if(ready){
   // A centered, two-column score panel replaces the old unbalanced text/header controls.
-  ctx.save();ctx.shadowColor='rgba(67,157,205,.12)';ctx.shadowBlur=17;
+  ctx.save();ctx.shadowColor='rgba(67,157,205,.12)';ctx.shadowBlur=lowFx()?0:17;
   rr(49,18,322,84,18,'rgba(13,30,53,.94)','rgba(70,119,154,.77)',1.5);ctx.restore();
   const head=ctx.createLinearGradient(64,0,356,0);head.addColorStop(0,C.gold);head.addColorStop(.5,C.cyan);head.addColorStop(1,C.cyan);
   rr(66,26,288,3,2,head);
@@ -1120,7 +1284,7 @@ function homeScreen(alpha=1){
  ctx.save();
  for(const b of homeButtons){
    const side=b.x<210?-1:1;
-   const x=b.x+side*22*away,y=b.y-5*away;
+   const x=b.x+side*22*away,y=b.y-5*away+(H-760)*.48;
    ctx.globalAlpha=t;
    ctx.shadowBlur=13;ctx.shadowColor='rgba(63,162,233,.20)';
    rr(x-34,y-33,68,66,18,'rgba(16,32,55,.84)','#416785',1.5);
@@ -1130,7 +1294,7 @@ function homeScreen(alpha=1){
  }
  // Keep the start instruction below the four menu buttons, in an empty part of the shaft.
  ctx.globalAlpha=t*(.85+.15*Math.sin(globalTime*3.2));
- label('TOUCH EMPTY SPACE TO PLAY',210,636+8*away,12,C.cyan,'800','center');
+ label('TOUCH EMPTY SPACE TO PLAY',210,636+8*away+(H-760)*.48,12,C.cyan,'800','center');
  ctx.restore();
 }
 function missionRows(){
@@ -1170,8 +1334,7 @@ function drawVolumeCard(name,value,y,accent){
  const x=77,ty=y+73,w=266;
  rr(x,ty-5,w,10,5,'#061625','#31465E',1);
  if(value>0)rr(x,ty-5,w*value,10,5,accent);
- ctx.save();ctx.shadowBlur=14;ctx.shadowColor=accent;
- circle(x+w*value,ty,12,'#F1F8FF',accent,3);ctx.restore();
+ circle(x+w*value,ty,12,'#F1F8FF',accent,3);
  label('0',50,ty,10,C.muted,'750','center');label('100',370,ty,10,C.muted,'750','center');
 }
 function drawSettingToggle(x,y,w,h,title,note,enabled,accent,wide=false){
@@ -1211,58 +1374,94 @@ function panelOverlay(){
   const entries=[['BEST SCORE',String(meta.best)],['BEST DEPTH',meta.bestDepth+' m'],['RUNS',String(meta.runs)],['DAYS PLAYED',String(meta.daysPlayed.length)],['DAILY CLEARS',String(meta.stats.dailyWins)],['SKINS',meta.owned.size+' / '+skins.length]];
   entries.forEach((entry,i)=>{let y=270+i*53;rr(38,y,344,43,11,'#16263F','#334761');label(entry[0],54,y+21,13,C.muted,'850');label(entry[1],361,y+21,16,i===0?C.gold:C.white,'950','right')});
  }
- const bp=.5+.5*Math.sin(globalTime*2.8);glossyButton(91,668,238,55,18,'#37C9EB','#9DF3FF',.18*bp,'#66E7FF');label('BACK',210,696,19,'#08283B','950','center');
+ const bp=.5+.5*Math.sin(globalTime*2.8);flatButton(91,668,238,55,18,'#37C9EB','#9DF3FF');label('BACK',210,696,19,'#08283B','950','center');
+}
+// Death-screen recap: up to three quests actually advanced this run.
+function drawDeathQuestResults(){
+ const rows=deathQuestResults;
+ label('QUEST PROGRESS',53,304,12,C.white,'900');
+ label(rows.length?rows.length+' UPDATED':'THIS RUN',367,304,10,C.muted,'850','right');
+ accentBar(52,315,314,'#2B5C6B',.8);
+ if(!rows.length){
+  rr(48,326,324,184,14,'rgba(15,29,47,.84)','#34485D',1);
+  label('NO QUEST PROGRESS YET',210,402,14,C.muted,'850','center');
+  label('KEEP PLAYING TO COMPLETE MISSIONS',210,430,10,C.muted,'750','center');
+  return;
+ }
+ const time=state.deathUiTime||0;
+ const ease=t=>{t=Math.max(0,Math.min(1,t));return t*t*(3-2*t)};
+ rows.forEach((q,i)=>{
+  const top=324+i*64,complete=q.completed;
+  const appear=ease((time-.08-i*.16)/.38);
+  if(appear<=0)return;
+  const fg=complete?'#8CF7C1':'#FFE284';
+  const back=complete?'rgba(21,66,53,.92)':'rgba(58,48,26,.87)';
+  const border=complete?'#4EBA93':'#B89A4B';
+  ctx.save();ctx.globalAlpha*=appear;ctx.translate(0,(1-appear)*9);
+  rr(48,top,324,58,11,back,border,1.1);
+  rr(48,top,3,58,2,fg);
+  circle(64,top+18,8,complete?'#2F8767':'#68552B',fg,1);
+  label(complete?'✓':'›',64,top+18,12,fg,'950','center');
+  label(q.name,79,top+18,11.4,C.white,'850');
+  label(complete?'100%':Math.round(q.newPct*100)+'%',355,top+18,12.5,fg,'950','right');
+  const delta=Math.round(q.gainPct*100),goalText=`${Math.min(Math.floor(q.end),q.goal)} / ${q.goal}   •   +${delta}% THIS RUN`;
+  label(goalText,79,top+36,10,complete?'#A4F1D2':'#F0D79F','750');
+  const x=79,y=top+47,w=276,h=7;
+  rr(x,y,w,h,3.5,complete?'#15382F':'#352E1C');
+  const bar=ease((time-.35-i*.16)/.72)*q.newPct;
+  if(bar>0)rr(x,y,Math.max(1,w*bar),h,3.5,fg);
+  if(q.oldPct>.003&&bar>=q.oldPct){
+   const bx=x+w*q.oldPct;line(bx,y-1,bx,y+h+1,complete?'#29654E':'#9A7D46',1.2);
+  }
+  ctx.restore();
+ });
 }
 function overlay(){
  if(state.mode==='ready'){homeScreen(1);return}
  // Gameplay uses the same shaft, but home controls must never be drawn once
  // the run starts. uiSlide is retained exclusively for the HUD entrance.
  if(state.mode==='play')return;
- if(['skins','missions','settings','records'].includes(state.mode)){panelOverlay();return}
+ if(['skins','missions','settings','records'].includes(state.mode)){
+  ctx.save();ctx.fillStyle='rgba(3,7,19,.88)';ctx.fillRect(0,0,W,H);
+  ctx.translate(0,(H-760)*.5);panelOverlay();ctx.restore();return;
+ }
  ctx.fillStyle='rgba(3,7,19,.85)';ctx.fillRect(0,0,W,H);
+ ctx.save();ctx.translate(0,(H-760)*.5);
  if(state.mode==='over'){
-  const uiPulse=.5+.5*Math.sin(globalTime*3.3), uiPulse2=.5+.5*Math.sin(globalTime*2.2+1.3);
+  const uiPulse=.5+.5*Math.sin(globalTime*3.3);
   ctx.save();
-  ctx.shadowBlur=24;ctx.shadowColor='rgba(80,205,255,.18)';
-  rr(34,108,352,598,26,'rgba(16,29,47,.90)','rgba(94,160,195,.55)',2);
-  ctx.shadowBlur=0;
-  accentBar(65,122,90,C.cyan,.9);accentBar(265,122,90,C.pink,.55+.25*uiPulse2);
+  rr(34,78,352,610,24,'rgba(16,29,47,.94)','rgba(94,160,195,.58)',2);
+  accentBar(65,92,92,C.cyan,.9);accentBar(263,92,92,C.pink,.52+.2*uiPulse);
   ctx.restore();
-  ctx.save();ctx.shadowBlur=18+10*uiPulse2;ctx.shadowColor='rgba(103,226,255,.22)';ball(210,143,32);ctx.restore();
-  label('POLARITY LOST',210,230,32,C.white,'950','center');
-  label(state.reason,210,267,11,C.pink,'800','center');
-  label('SCORE   '+state.score,210,327,28,C.gold,'950','center');
-  label('DEPTH '+Math.floor(state.dist/10)+'m  •  BEST '+meta.best,210,365,15,C.muted,'800','center');
-  label('GEMS '+state.gems+'  •  SLINGSHOTS '+state.boosts,210,393,11,C.white,'750','center');
-  if(state.runMode==='daily')label('DAILY CIRCUIT • SAME COURSE',210,426,10,C.gold,'800','center');
+  ball(210,127,27);
+  label('POLARITY LOST',210,186,30,C.white,'950','center');
+  label(state.reason,210,214,10,C.pink,'800','center');
+  label('SCORE  '+state.score,210,254,27,C.gold,'950','center');
+  label('DEPTH '+Math.floor(state.dist/10)+'m  •  BEST '+meta.best,210,281,12,C.muted,'800','center');
+  drawDeathQuestResults();
+  const revive=reviveBounds(),retry=retryBounds();
   if(!state.reviveUsed){
-   const available=canShowRewarded();
-   const glow=available?(.35+.45*uiPulse):0;
-   glossyButton(40,458,340,78,18,available?'#1B6D78':'#253044',available?C.green:'#556981',glow,available?'#8DFFBF':'#556981');
-   if(available){
-    const bx=316,by=451+Math.sin(globalTime*3.4)*1.2;ctx.save();ctx.shadowBlur=16;ctx.shadowColor='rgba(255,222,113,.35)';rr(bx,by,48,22,10,'#FFD45B','#FFF2BF',1.5);ctx.restore();label('AD',bx+24,by+14,11,'#513A00','950','center');
-    ctx.save();ctx.globalAlpha=.16+.12*uiPulse;ctx.beginPath();ctx.roundRect(46,464,328,66,14);ctx.clip();
-    const sheen=(globalTime*110)%470-140;ctx.fillStyle='rgba(255,255,255,.14)';ctx.fillRect(sheen,456,54,92);ctx.restore();
-   }
-   label(available?(demoAds&&!window.MagnetRewardedAds?'▶ REVIVE • TEST AD':'▶ REVIVE • WATCH AD'):'REVIVE • ADS UNAVAILABLE',210,482,available?18:15,available?C.white:C.muted,'950','center');
-   label(available?'ONE REVIVE PER RUN • KEEP YOUR SCORE':'ANDROID AD CONNECTION REQUIRED',210,511,10,available?C.green:C.muted,'850','center');
+   const bg=ctx.createLinearGradient(revive.x,revive.y,revive.x+revive.w,revive.y+revive.h);
+   bg.addColorStop(0,'#D9FF73');bg.addColorStop(.48,'#7AF8C7');bg.addColorStop(1,'#37DDF9');
+   flatButton(revive.x,revive.y,revive.w,revive.h,15,bg,'#E6FFFF');
+   rr(revive.x+revive.w-31,revive.y-9,33,19,8,'#FFD35F','#FFF3B9',1);
+   label('AD',revive.x+revive.w-14.5,revive.y+1,10,'#372D03','950','center');
+   label('▶ REVIVE',revive.x+revive.w*.5,revive.y+27,17,'#062738','950','center');
+   label('3-SECOND TEST',revive.x+revive.w*.5,revive.y+49,9,'#164252','850','center');
   }else{
-   label('REVIVE USED • THIS RUN',210,470,13,C.muted,'850','center');
+   flatButton(revive.x,revive.y,revive.w,revive.h,15,'#293747','#46576A');
+   label('REVIVE USED',revive.x+revive.w*.5,revive.y+35,13,C.muted,'850','center');
   }
-  const retry=retryBounds();
-  glossyButton(retry.x,retry.y,retry.w,retry.h,17,C.cyan,'#C9F8FF',.08+.08*uiPulse2,'#6DE9FF');
-  label('RETRY  ↻',210,retry.y+retry.h/2,22,'#061B2F','950','center');
-  label('RETURN TO START',210,retry.y+retry.h+30,12,C.muted,'800','center');
-  if(state.adError)label(state.adError,210,704,11,C.pink,'800','center');
+  flatButton(retry.x,retry.y,retry.w,retry.h,15,C.cyan,'#C9F8FF');
+  label('RETRY  ↻',retry.x+retry.w*.5,retry.y+retry.h*.5,18,'#061B2F','950','center');
+  if(state.adError)label(state.adError,210,672,11,C.pink,'800','center');
  }else if(state.mode==='ad'){
-  // The real ad is rendered by the Android SDK, not this Canvas.
-  // In browser demo mode, clearly distinguish this stand-in from real advertising.
-  const ap=.5+.5*Math.sin(globalTime*3.2);
-  label(demoAds&&!window.MagnetRewardedAds?'TEST AD • NO REAL AD':'REWARDED AD',210,245,18,C.green,'900','center');
-  ctx.save();ctx.shadowBlur=22;ctx.shadowColor='rgba(95,241,184,.22)';rr(58,291,304,150,19,'#152B43','#4B8890',2);ctx.shadowBlur=0;ctx.globalAlpha=.16+.1*ap;rr(66,300,288,36,13,'rgba(255,255,255,.11)');ctx.restore();
-  label('REVIVE YOUR BALL',210,328,22,C.white,'950','center');
-  label('RESUME WITH A SHORT SHIELD',210,373,12,C.muted,'800','center');
-  label('WAIT FOR THE REWARD RESULT…',210,414,12,C.green,'850','center');
+  // Full-screen placeholder, no native ad SDK and no ad network calls.
+  const remaining=Math.max(0,Math.ceil((demoAdEndAt-performance.now())/1000));
+  ctx.fillStyle='rgba(2,7,18,.96)';ctx.fillRect(0,-(H-760)*.5,W,H);
+  label('РЕКЛАМА',210,330,38,C.white,'950','center');
+  label('ТЕСТОВЫЙ ПОКАЗ',210,369,13,C.muted,'850','center');
+  label(''+remaining,210,425,28,C.cyan,'900','center');
  }else if(state.mode==='pause'){
   const pulse=.5+.5*Math.sin(globalTime*2.8),cont=pauseContinueBounds(),setb=pauseSettingsBounds(),homeb=pauseHomeBounds();
   ctx.save();
@@ -1295,20 +1494,48 @@ function overlay(){
   ctx.save();ctx.lineWidth=5.5;ctx.lineCap='round';ctx.strokeStyle='rgba(126,231,255,.96)';ctx.shadowBlur=18;ctx.shadowColor='rgba(126,231,255,.28)';ctx.beginPath();ctx.arc(210,332,78,-Math.PI/2,-Math.PI/2+Math.PI*2*frac,false);ctx.stroke();ctx.restore();
   label('GET READY',210,242,19,C.cyan,'900','center');label(String(sec),210,332,58,C.white,'950','center');label('RESUMING…',210,418,14,`rgba(227,247,255,${a})`,'800','center');
  }
+ ctx.restore();
 }
 function render(){ctx.save();if(meta.screenShake&&state.shake>0)ctx.translate(Math.sin(globalTime*92)*state.shake*.42,Math.cos(globalTime*100)*state.shake*.42);
  background();
  const fields=activeFields();if(state.mode!=='ready'){
   drawForceLinks(fields);
-  for(const m of world.magnets)drawMagnet(m,fields);for(const h of world.hazards)drawHazard(h);for(const g of world.gems)drawGem(g);
+  for(let i=fromY(world.magnets,state.dist-125);i<world.magnets.length;i++){const m=world.magnets[i];if(m.y>state.dist+H+125)break;drawMagnet(m,fields)}
+  for(let i=fromY(world.hazards,state.dist-65);i<world.hazards.length;i++){const h=world.hazards[i];if(h.y>state.dist+H+65)break;drawHazard(h)}
+  for(let i=fromY(world.gems,state.dist-30);i<world.gems.length;i++){const g=world.gems[i];if(g.y>state.dist+H+30)break;drawGem(g)}
  }
- drawBall(fields);for(const ripple of state.rings){ctx.save();ctx.globalAlpha=Math.max(0,ripple.life/ripple.max)*.65;ctx.shadowColor=ripple.color;ctx.shadowBlur=12;circle(ripple.x,ripple.y,ripple.r,undefined,ripple.color,1.7);ctx.restore();}for(const p of state.effects){ctx.globalAlpha=Math.max(0,p.life/p.max);circle(p.x,p.y,p.r,p.color)}ctx.globalAlpha=1;if(['ready','play','over','pause','resume'].includes(state.mode))hud();
+ drawBall(fields);for(const ripple of state.rings){ctx.save();ctx.globalAlpha=Math.max(0,ripple.life/ripple.max)*.65;ctx.shadowColor=ripple.color;ctx.shadowBlur=lowFx()?0:12;circle(ripple.x,ripple.y,ripple.r,undefined,ripple.color,1.7);ctx.restore();}for(const p of state.effects){ctx.globalAlpha=Math.max(0,p.life/p.max);circle(p.x,p.y,p.r,p.color)}ctx.globalAlpha=1;if(['ready','play','over','pause','resume'].includes(state.mode))hud();
  // Rendering the home overlay in play mode left faded menu buttons on
  // top of the game during the opening transition (and in test captures).
  // Only ready/paused/game-over/modal modes can draw a full-screen overlay.
  if(state.mode!=='play')overlay();ctx.restore();}
-function frame(t){if(manualFrames){rafLast=t;requestAnimationFrame(frame);return}if(!rafLast)rafLast=t;let elapsed=Math.min(.06,(t-rafLast)/1000);rafLast=t;accum+=elapsed;let n=0;
- while(accum>=DT&&n++<8){update(DT);accum-=DT}render();requestAnimationFrame(frame)}
+function frame(t){
+ if(manualFrames){rafLast=t;requestAnimationFrame(frame);return}
+ updateSoundtrack();
+ if(!rafLast)rafLast=t;
+ const elapsed=Math.min(.06,(t-rafLast)/1000);rafLast=t;accum+=elapsed;
+ let n=0;while(accum>=DT&&n++<8){update(DT);accum-=DT}
+ // Preserve 120 FPS cap during active gameplay, use 30 FPS for stationary
+ // menus and fake ads (no high-frequency simulation / GPU work needed).
+ const drawStep=state.mode==='play'?DT:1/30;
+ renderAccumulator+=elapsed;
+ if(renderAccumulator>=drawStep-.00012){
+  if(state.mode==='play')qualityFrames++;
+  render();renderAccumulator=Math.max(0,renderAccumulator-drawStep);
+  if(renderAccumulator>drawStep)renderAccumulator%=drawStep;
+ }
+ if(state.mode==='play'){
+  qualityWindow+=elapsed;
+  if(qualityWindow>=2.7){
+   const measured=qualityFrames/Math.max(.001,qualityWindow);
+   if(measured<46 && renderQuality>.65){renderQuality=Math.max(.65,+(renderQuality-.15).toFixed(2));qualityRecovery=0;fitCanvas()}
+   else if(measured>57&&renderQuality<1){qualityRecovery++;if(qualityRecovery>=3){renderQuality=Math.min(1,+(renderQuality+.08).toFixed(2));qualityRecovery=0;fitCanvas()}}
+   else qualityRecovery=0;
+   qualityWindow=0;qualityFrames=0;
+  }
+ }else{qualityWindow=0;qualityFrames=0;qualityRecovery=0}
+ requestAnimationFrame(frame);
+}
 // Plan a safe TOUCH sequence in tests using the same fixed-step physics as the player.
 // This does not render a fake path: tests replay the taps in Chromium and record Canvas.
 function planTouches(ticks=120){
@@ -1332,9 +1559,9 @@ function planTouches(ticks=120){
  let top=beam[0];return {steps:ticks,path:top.path,reached:top.dist,failed:false,finalX:top.x,flips:top.switches};
 }
 // Debug API only: browser tests call actual game engine and take snapshots of the live Canvas.
-window.__magnetDebug={
+window.__magnetDebug={physicsVariant:'classic',maxFps:120,renderQuality:()=>renderQuality,bufferSize:()=>({width:canvas.width,height:canvas.height,cssWidth:canvas.clientWidth,cssHeight:canvas.clientHeight}),music:()=>({scene:musicScene,current:musicCurrent?.id||null,outgoing:musicOutgoing?.id||null,bag:musicBag.map(t=>t.id),last:lastGameTrack,unlocked:musicUnlocked,volume:musicCurrent?.element.volume||0,paused:musicCurrent?.element.paused??true,trackTime:musicCurrent?.element.currentTime||0}),nextMusic:()=>switchSoundtrack('run',true),
  snapshot:()=>({mode:state.mode,reviveUsed:state.reviveUsed,invuln:state.invuln,adPending:state.adPending,adError:state.adError,runPaid:state.runPaid,runMode:state.runMode,uiSlide:state.uiSlide,polarity:state.polarity,x:state.x,vx:state.vx,dist:state.dist,speed:state.speed,boost:state.boost,simT:state.simT,score:state.score,gems:state.gems,near:state.near,boosts:state.boosts,combo:state.combo,flips:state.flips,reason:state.reason,best:meta.best,coins:meta.coins,skin:meta.skin,magnetSkin:meta.magnetSkin,backgroundSkin:meta.backgroundSkin,runs:meta.runs,overdriveCharge:state.overdriveCharge,overdriveTime:state.overdriveTime,orbit:state.orbit?{...state.orbit}:null,shatters:state.shatters,resumeTimer:state.resumeTimer,resumeFlash:state.resumeFlash,ballY:ballY(),ballWorldY:ballWorldY()}),
- start:resetRun,returnToHome,retryBounds,flip,openPanel,closePanel,requestRevive,reviveAfterReward,die,canShowRewarded,collisionClearance,manual:(v=true)=>{manualFrames=v;accum=0;},step:seconds=>{for(let i=0,n=Math.ceil(seconds/DT);i<n;i++)update(seconds/n);render()},
+ start:resetRun,returnToHome,retryBounds,reviveBounds,flip,openPanel,closePanel,requestRevive,reviveAfterReward,die,canShowRewarded,collisionClearance,manual:(v=true)=>{manualFrames=v;accum=0;},step:seconds=>{for(let i=0,n=Math.ceil(seconds/DT);i<n;i++)update(seconds/n);render()},
  setState:changes=>{for(const [k,v] of Object.entries(changes))if(['x','vx','dist','polarity','mode','speed','boost','score','combo','comboTime','gems','near','boosts','simT','slingCooldown','overdriveCharge','overdriveTime','invuln','reviveUsed','orbit','shatters','resumeTimer','resumeFlash'].includes(k))state[k]=v;render()},
  stage:()=>({solvable:world.solvable,validated:world.validated,nextChunk:world.nextChunk,failed:world.failed,checks:world.checks.map(x=>({...x})),kinds:world.magnets.reduce((o,m)=>(o[m.kind]=(o[m.kind]||0)+1,o),{}),hazardKinds:world.hazards.reduce((o,h)=>(o[h.kind]=(o[h.kind]||0)+1,o),{})}),
  magnets:()=>world.magnets.map(m=>({...m})),hazards:()=>world.hazards.map(h=>({...h})),gems:()=>world.gems.map(g=>({...g})),
@@ -1342,6 +1569,7 @@ window.__magnetDebug={
  cosmetics:()=>({tab:cosmeticTab,selected:{...cosmeticSelection},equipped:{ball:meta.skin,magnets:meta.magnetSkin,backgrounds:meta.backgroundSkin},prices:Object.fromEntries(cosmeticTabs.map(tab=>[tab,cosmeticCatalog[tab].map(i=>({id:i.id,cost:cosmeticPrice(tab,i.id),owned:ownedCosmetic(tab,i.id)}))]))}),
  cosmeticTab:setCosmeticTab,selectCosmetic:(tab,id)=>{setCosmeticTab(tab);if(cosmeticCatalog[tab]?.some(i=>i.id===id))cosmeticSelection[tab]=id;render()},equipCosmetic:equipSelected,
  missions:()=>({daily:dayMissions(meta.daily.key),weekly:weeklyTasks,career:careerTasks}),
+ deathQuests:()=>deathQuestResults.map(q=>({...q})),runQuestStart:()=>runQuestBaseline?{...runQuestBaseline,doneDaily:[...runQuestBaseline.doneDaily],doneWeekly:[...runQuestBaseline.doneWeekly],doneCareer:[...runQuestBaseline.doneCareer]}:null,
  clock:(iso=null)=>{simulatedNow=iso;syncPeriods();render()},
  track,claimCircuit,checkMissions,selectTab:(tab)=>{if(['daily','weekly','career'].includes(tab))missionTab=tab;render()},
  dailyStart:()=>resetRun(false,'daily'),
