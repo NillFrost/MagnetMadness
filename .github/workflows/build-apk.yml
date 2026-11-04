@@ -27,8 +27,11 @@ jobs:
       - name: Android platform and build tools
         run: |
           echo "Using preinstalled Android SDK: $ANDROID_HOME"
-          sdkmanager --version
-          sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -n "$SDKMANAGER"
+          echo "SDK Manager: $SDKMANAGER"
+          "$SDKMANAGER" --version
+          "$SDKMANAGER" 'platforms;android-36' 'build-tools;35.0.0'
 
       - name: Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
