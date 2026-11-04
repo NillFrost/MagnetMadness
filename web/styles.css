@@ -1,0 +1,8 @@
+:root { color-scheme: dark; }
+* { box-sizing:border-box; }
+html,body { margin:0; width:100%; height:100%; overflow:hidden; background:#050817; font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif; }
+body { display:grid; place-items:center; touch-action:none; }
+.game-shell { position:relative; height:min(100dvh, 900px); aspect-ratio:420/760; max-width:100vw; }
+canvas { display:block; width:100%; height:100%; touch-action:none; user-select:none; -webkit-user-select:none; outline:none; }
+.assistive { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+@media (max-aspect-ratio: 420/760) { .game-shell { width:100vw; height:auto; aspect-ratio:420/760; } }

@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.nillfrost.magnetmadness'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.nillfrost.magnetmadness'
+        minSdk 24
+        targetSdk 36
+        versionCode 31201
+        versionName '3.12.1'
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs += ["${rootProject.projectDir}/web"]
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Android signs this variant automatically using a debug keystore.
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+            // Release signing is intentionally not hardcoded.
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.17.1'
+}
