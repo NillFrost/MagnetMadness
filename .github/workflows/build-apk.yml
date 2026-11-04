@@ -1,10 +1,8 @@
-name: Build Magnet Madness APK
+name: Build Magnet Madness - Physics Comparison
 
 on:
   push:
-    branches: [main]
-    paths-ignore:
-      - 'README.md'
+    branches: [classic, arcade]
   workflow_dispatch:
 
 permissions:
@@ -13,24 +11,23 @@ permissions:
 jobs:
   android-debug:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+    env:
+      GAME_VARIANT: ${{ github.ref_name }}
     steps:
-      - name: Checkout project
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Java 17
+      - name: JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Android platform and build tools
+      - name: Android SDK
         run: |
-          echo "Using preinstalled Android SDK: $ANDROID_HOME"
           SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
           test -n "$SDKMANAGER"
-          echo "SDK Manager: $SDKMANAGER"
-          "$SDKMANAGER" --version
           "$SDKMANAGER" 'platforms;android-36' 'build-tools;35.0.0'
 
       - name: Gradle 8.13
@@ -38,29 +35,37 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Build debug APK
+      - name: Apply common fixes and selected physics
+        run: |
+          test "$GAME_VARIANT" = classic || test "$GAME_VARIANT" = arcade
+          python3 tools/apply_variant.py "$GAME_VARIANT"
+          test -s web/game.js
+
+      - name: Build separately installable Android APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
 
-      - name: Save APK as workflow artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MagnetMadness-v3.12.1-debug-APK
+          name: MagnetMadness-${{ github.ref_name }}-v3.13
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish APK for direct download
+      - name: Publish direct APK
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk MagnetMadness-v3.12.1-debug.apk
-          TAG=v3.12.1-android-debug
+          VARIANT="$GAME_VARIANT"
+          NAME="MagnetMadness-${VARIANT^}-v3.13.apk"
+          TAG="physics-${VARIANT}-v3.13"
+          cp app/build/outputs/apk/debug/app-debug.apk "$NAME"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" MagnetMadness-v3.12.1-debug.apk --clobber
+            gh release upload "$TAG" "$NAME" --clobber
           else
-            gh release create "$TAG" MagnetMadness-v3.12.1-debug.apk \
+            gh release create "$TAG" "$NAME" \
               --target "$GITHUB_SHA" \
-              --title 'Magnet Madness v3.12.1 — Android test APK' \
-              --notes 'Offline HTML5 game in Android WebView. Debug-signed test build. Rewarded ads require SDK integration.' \
+              --title "Magnet Madness 3.13 - ${VARIANT^} Physics" \
+              --notes "Separate side-by-side Android debug build. High-DPI adaptive Canvas, maximum 120 FPS, flat modal controls. The Classic variant retains original physics; Arcade uses gentler physics. Rewarded ads are not yet integrated." \
               --prerelease
           fi
