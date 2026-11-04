@@ -39,6 +39,8 @@ jobs:
         run: |
           test "$GAME_VARIANT" = classic || test "$GAME_VARIANT" = arcade
           python3 tools/apply_variant.py "$GAME_VARIANT"
+          python3 tools/patch_v314.py "$GAME_VARIANT"
+          node --check web/game.js
           test -s web/game.js
 
       - name: Build separately installable Android APK
@@ -47,7 +49,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MagnetMadness-${{ github.ref_name }}-v3.13
+          name: MagnetMadness-${{ github.ref_name }}-v3.14
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
@@ -57,8 +59,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VARIANT="$GAME_VARIANT"
-          NAME="MagnetMadness-${VARIANT^}-v3.13.apk"
-          TAG="physics-${VARIANT}-v3.13"
+          NAME="MagnetMadness-${VARIANT^}-v3.14.apk"
+          TAG="physics-${VARIANT}-v3.14"
           cp app/build/outputs/apk/debug/app-debug.apk "$NAME"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$NAME" --clobber
@@ -66,6 +68,6 @@ jobs:
             gh release create "$TAG" "$NAME" \
               --target "$GITHUB_SHA" \
               --title "Magnet Madness 3.13 - ${VARIANT^} Physics" \
-              --notes "Separate side-by-side Android debug build. High-DPI adaptive Canvas, maximum 120 FPS, flat modal controls. The Classic variant retains original physics; Arcade uses gentler physics. Rewarded ads are not yet integrated." \
+              --notes "Separate side-by-side Android debug build. High-DPI adaptive Canvas, maximum 120 FPS, flat modal controls. The Classic variant retains original physics; Arcade uses gentler physics. Revive uses a 3-second test-ad overlay only (no network)." \
               --prerelease
           fi
