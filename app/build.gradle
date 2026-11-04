@@ -13,8 +13,8 @@ android {
         applicationId "com.nillfrost.magnetmadness.${physicsVariant}"
         minSdk 24
         targetSdk 36
-        versionCode 31301
-        versionName "3.13-${physicsVariant}"
+        versionCode 31601
+        versionName "3.16.1-${physicsVariant}"
         manifestPlaceholders = [appLabel: "Magnet Madness ${physicsVariant.capitalize()}"]
     }
 
