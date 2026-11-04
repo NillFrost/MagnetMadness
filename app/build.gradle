@@ -2,16 +2,20 @@ plugins {
     id 'com.android.application'
 }
 
+def physicsVariant = (System.getenv('GAME_VARIANT') ?: 'classic').toLowerCase()
+if (!(physicsVariant in ['classic', 'arcade'])) throw new GradleException('Invalid GAME_VARIANT')
+
 android {
     namespace 'com.nillfrost.magnetmadness'
     compileSdk 36
 
     defaultConfig {
-        applicationId 'com.nillfrost.magnetmadness'
+        applicationId "com.nillfrost.magnetmadness.${physicsVariant}"
         minSdk 24
         targetSdk 36
-        versionCode 31201
-        versionName '3.12.1'
+        versionCode 31301
+        versionName "3.13-${physicsVariant}"
+        manifestPlaceholders = [appLabel: "Magnet Madness ${physicsVariant.capitalize()}"]
     }
 
     sourceSets {
