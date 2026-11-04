@@ -24,11 +24,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Android platform and build tools
-        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+        run: |
+          echo "Using preinstalled Android SDK: $ANDROID_HOME"
+          sdkmanager --version
+          sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
 
       - name: Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
